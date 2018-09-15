@@ -1,0 +1,7 @@
+[package]
+name = "deslite"
+version = "0.1.0"
+authors = ["hrishi <hrishikesh.mk1@gmail.com>"]
+
+[dependencies]
+libsqlite3-sys = "0.9.3"
