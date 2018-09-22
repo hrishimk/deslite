@@ -2,6 +2,11 @@
 name = "deslite"
 version = "0.1.0"
 authors = ["hrishi <hrishikesh.mk1@gmail.com>"]
+description = "Limited sqlite lib for Rust"
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/hrishimk/dengine"
+categories = ["database"]
 
 [dependencies]
 libsqlite3-sys = "0.9.3"
