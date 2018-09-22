@@ -8,27 +8,29 @@ use Row;
 use Rows;
 
 #[derive(Debug)]
-pub struct Stmt<'a> {
-    con: &'a Connection,
+pub struct Stmt<'con> {
+    con: &'con Connection,
     pub stmt: *mut ffi::sqlite3_stmt,
 }
 
-impl<'a> Drop for Stmt<'a> {
+impl<'con> Drop for Stmt<'con> {
     fn drop(&mut self) {
-        let c = unsafe { ffi::sqlite3_finalize(self.stmt) };
+        let _c = unsafe { ffi::sqlite3_finalize(self.stmt) };
+        drop(self.con);
     }
 }
 
-impl<'a> Stmt<'a> {
-    pub fn init(con: &'a Connection) -> Self {
+impl<'con> Stmt<'con> {
+    pub fn init(con: &'con Connection) -> Self {
         Self {
             con,
             stmt: unsafe { std::mem::uninitialized() },
         }
     }
 
-    pub fn prepare(&mut self, sql: &str) -> Result<&mut Self, &str> {
-        let cstr = std::ffi::CString::new(sql).unwrap();
+    pub fn prepare(&mut self, sql: &str) -> Result<&mut Self, Error> {
+        let cstr = std::ffi::CString::new(sql)
+            .map_err(|_e| Error::PrepareErr("Null Error".to_string()))?;
 
         let rc = unsafe {
             ffi::sqlite3_prepare_v2(
@@ -41,10 +43,7 @@ impl<'a> Stmt<'a> {
         };
 
         if rc != ffi::SQLITE_OK {
-            let err = unsafe { ffi::sqlite3_errmsg(self.con.con) };
-            let err = unsafe { std::ffi::CStr::from_ptr(err) };
-            println!("Prepare failure error: {:?}", err);
-            return Err("Failed to prepare");
+            return Err(Error::PrepareErr(self.con.get_last_error(rc)));
         }
 
         Ok(self)
@@ -74,14 +73,15 @@ impl<'a> Stmt<'a> {
         }
     }
 
-    pub fn bind_values<T>(&mut self, params: Vec<T>)
+    pub fn bind_values<T>(&mut self, params: &Vec<T>) -> Lesult<()>
     where
         T: std::clone::Clone,
         Value: std::convert::From<T>,
     {
         for (i, n) in params.iter().cloned().enumerate() {
-            self.bind(n, (i + 1) as i32).unwrap();
+            self.bind(n, (i + 1) as i32)?;
         }
+        Ok(())
     }
 
     pub fn bind<T>(&mut self, param: T, index: i32) -> Lesult<()>
@@ -91,13 +91,11 @@ impl<'a> Stmt<'a> {
         let param = Value::from(param);
         use Value::*;
 
-        println!("index is {:#?}", index);
-
         let res = match param {
             Int(v) => unsafe { ffi::sqlite3_bind_int64(self.stmt, index, v) },
             Uint(v) => unsafe { ffi::sqlite3_bind_int64(self.stmt, index, v as i64) },
             Float(v) => unsafe { ffi::sqlite3_bind_double(self.stmt, index, v) },
-            Buf(v) => self.bind_buff(v, index),
+            Bytes(v) => self.bind_buff(v, index),
             String(v) => self.bind_buff(v.into_bytes(), index),
             Null => unsafe { ffi::sqlite3_bind_null(self.stmt, index) },
         };
@@ -109,17 +107,47 @@ impl<'a> Stmt<'a> {
         }
     }
 
-    pub fn step(&self) -> c_int {
-        unsafe { ffi::sqlite3_step(self.stmt) }
+    pub fn step(&self) -> Lesult<c_int> {
+        if self.stmt.is_null() {
+            return Err(Error::PrepareErr(
+                "Statement is not prepared or is null".to_string(),
+            ));
+        }
+        Ok(unsafe { ffi::sqlite3_step(self.stmt) })
     }
 
-    pub fn get_rows(&self) -> Rows {
+    pub fn execute(&self) -> Lesult<()> {
+        let res = self.step()?;
+        if res == ffi::SQLITE_DONE || res == ffi::SQLITE_ROW {
+            Ok(())
+        } else {
+            Err(Error::SqliteError(self.con.get_last_error(res)))
+        }
+    }
+
+    pub fn get_rows(self) -> Rows<'con> {
         Rows::new(self)
     }
 
-    pub fn reset(&mut self) {
+    pub fn get_row(&'con self) -> Lesult<Row<'con>> {
+        let step = self.step()?;
+        if step == ffi::SQLITE_ROW {
+            Ok(Row::new(self))
+        } else if step == ffi::SQLITE_DONE {
+            Err(Error::Empty)
+        } else {
+            Err(Error::SqliteError(self.con.get_last_error(step)))
+        }
+    }
+
+    pub fn reset(&self) {
         unsafe {
             ffi::sqlite3_reset(self.stmt);
+        }
+    }
+
+    pub fn clear_bindings(&mut self) {
+        unsafe {
             ffi::sqlite3_clear_bindings(self.stmt);
         }
     }
@@ -134,7 +162,7 @@ impl<'a> Stmt<'a> {
             .unwrap()
     }
 
-    pub fn colum_index(&self, key: &str) -> Result<usize, String> {
+    pub fn colum_index(&self, key: &str) -> Lesult<usize> {
         let count = self.colum_count();
 
         for i in 0..count {
@@ -142,7 +170,7 @@ impl<'a> Stmt<'a> {
                 return Ok(i);
             }
         }
-        Err(format!("Cannot find colum {}", key))
+        Err(Error::IndexOutOfBounds(format!("{}", key)))
     }
 
     pub fn colum_type(&self, index: usize) -> Lesult<SqliteTypes> {
@@ -168,9 +196,11 @@ impl<'a> Stmt<'a> {
         if c_len > 0 {
             let nvec =
                 unsafe { Vec::from_raw_parts(c_ptr as *mut u8, c_len as usize, c_len as usize) };
-            Value::Buf(nvec)
+            let clone = nvec.clone();
+            std::mem::forget(nvec);
+            Value::Bytes(clone)
         } else {
-            Value::Buf(vec![])
+            Value::Bytes(vec![])
         }
     }
 
@@ -179,6 +209,10 @@ impl<'a> Stmt<'a> {
 
         let cstring = unsafe { std::ffi::CString::from_raw(cstring as *mut i8) };
 
-        Value::String(cstring.into_string().unwrap())
+        let clone = cstring.clone().into_string().unwrap();
+
+        std::mem::forget(cstring);
+
+        Value::String(clone)
     }
 }

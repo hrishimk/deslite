@@ -15,7 +15,7 @@ impl From<f64> for Value {
 
 impl From<String> for Value {
     fn from(val: String) -> Self {
-        Value::Buf(val.into_bytes())
+        Value::Bytes(val.into_bytes())
     }
 }
 
@@ -37,27 +37,26 @@ where
     }
 }
 
-impl From<Value> for u64 {
-    fn from(val: Value) -> Self {
-        match val {
-            Value::Int(a) => a as Self,
-            Value::Uint(a) => a,
-            Value::Float(a) => a as Self,
-            _ => panic!("Failed to convert to u64"),
+macro_rules! impl_from_value_for_nums {
+    ($t:ty) => {
+        impl From<Value> for $t {
+            fn from(val: Value) -> Self {
+                match val {
+                    Value::Int(a) => a as Self,
+                    Value::Uint(a) => a as Self,
+                    Value::Float(a) => a as Self,
+                    _ => panic!("Failed to convert to u64"),
+                }
+            }
         }
-    }
+    };
 }
 
-impl From<Value> for i64 {
-    fn from(val: Value) -> Self {
-        match val {
-            Value::Int(a) => a,
-            Value::Uint(a) => a as Self,
-            Value::Float(a) => a as Self,
-            _ => panic!("Failed to convert to u64"),
-        }
-    }
-}
+impl_from_value_for_nums!(usize);
+impl_from_value_for_nums!(u64);
+impl_from_value_for_nums!(u32);
+impl_from_value_for_nums!(i64);
+impl_from_value_for_nums!(i32);
 
 impl From<Value> for String {
     fn from(val: Value) -> Self {
